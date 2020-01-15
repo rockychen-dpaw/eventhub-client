@@ -44,6 +44,7 @@ payload={}
 
     def __call__(self):
         try:
+            print("")
             print("Run Test({}):{} ...".format(self.name,self.desc))
             self.setup()      
             self.test()
@@ -89,7 +90,7 @@ payload={}
 
 class SinglePubSubTest(BaseTest):
     def __init__(self,name,desc,database=None):
-        super().__init__(name,desc,pub=Publisher('Pub_Test','test_event'),sub=Subscriber('Sub_Test'))
+        super().__init__(name,desc,pub=Publisher('Pub_Unitest','unitest_event'),sub=Subscriber('Sub_Unitest'))
 
 class BasicPubSubTest(SinglePubSubTest):
     def __init__(self,name="Basic Pub/Sub Testing",desc="Test basic publish/subscribe event"):

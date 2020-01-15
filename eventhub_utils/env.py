@@ -6,12 +6,9 @@ from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-env_loaded = False
-if not env_loaded:
-    dot_env = os.path.join(BASE_DIR, ".env")
-    if os.path.exists(dot_env) :
-        load_dotenv(dotenv_path=dot_env)
-        env_loaded = True
+dot_env = os.path.join(BASE_DIR, ".env")
+if os.path.exists(dot_env) :
+    load_dotenv(dotenv_path=dot_env)
 
 def env(key, default=None, required=False,vtype=None):
     """

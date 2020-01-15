@@ -7,6 +7,7 @@ from . import database
 
 from . import settings
 from . import timezone
+from .env import env
 
 from .classproperty import classproperty,cachedclassproperty
 
