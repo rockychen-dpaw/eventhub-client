@@ -20,10 +20,11 @@ class Publisher(object):
     def publish(self, payload):
         """
         payload
+        Return the created event object
         """
         with models.Publisher.database.active_context():
             if self.event_type.sample is None:
                 self._update_event_type_sample = False
                 self.event_type.sample = payload
-            models.Event.create(publisher=self.publisher,event_type=self.event_type,source=self.host,payload=payload)
+            return models.Event.create(publisher=self.publisher,event_type=self.event_type,source=self.host,payload=payload)
 

@@ -5,6 +5,8 @@ from .publisher import Publisher
 
 from .subscriber import Subscriber
 from . import settings
+from . import models
+
 from eventhub_utils import timezone
 
 class BaseTest(object):
@@ -29,6 +31,7 @@ class BaseTest(object):
                 self.subs.add(v.subscriber)
                 self.subscribes.append(v)
 
+    @staticmethod
     def print_event(event):
         print("""
 Process the event.
@@ -56,8 +59,9 @@ payload={}
         pass
 
     def setup(self):
-        for sub in self.subscribes:
-            sub.start()
+        pass
+        #for sub in self.subscribes:
+        #    sub.start()
 
     def tearup(self):
         for sub in self.subscribes:
@@ -67,20 +71,20 @@ payload={}
             sub.wait_to_shutdown()
 
         
-        with self._connection.cursor() as cur:
+        with models.Event.database:
             #delete testing data
             for sub in self.subs:
-                cur.execute("delete from event_processing_history as a using subscribed_event as b where a.subscribed_event_id = b.id and b.subscriber_id = '{}'".format(sub.name))
-                cur.execute("delete from subscribed_event where subscriber_id = '{}'".format(sub.name))
-                cur.execute("delete from subscribed_event_type where subscriber_id = '{}'".format(sub.name))
-                cur.execute("delete from subscriber where name = '{}'".format(sub.name))
-                cur.execute("delete from event_type where publisher_id = 'EventHubConsole' and name = 'sub_{}'".format(sub.name))
+                models.Event.database.execute_sql("delete from event_processing_history as a using subscribed_event as b where a.subscribed_event_id = b.id and b.subscriber_id = '{}'".format(sub.name))
+                models.Event.database.execute_sql("delete from subscribed_event where subscriber_id = '{}'".format(sub.name))
+                models.Event.database.execute_sql("delete from subscribed_event_type where subscriber_id = '{}'".format(sub.name))
+                models.Event.database.execute_sql("delete from subscriber where name = '{}'".format(sub.name))
+                models.Event.database.execute_sql("delete from event_type where publisher_id = 'EventHubConsole' and name = 'sub_{}'".format(sub.name))
     
             for pub in self.pubs:
-                cur.execute("delete from event where publisher_id = '{}'".format(sub.name))
-                cur.execute("delete from event_type where publisher_id = '{}'".format(sub.name))
-                cur.execute("delete from publisher where publisher_id = '{}'".format(sub.name))
-                cur.execute("delete from event_type where publisher_id = 'EventHubConsole' and name = 'pub_{}'".format(pub.name))
+                models.Event.database.execute_sql("delete from event where publisher_id = '{}'".format(pub.name))
+                models.Event.database.execute_sql("delete from event_type where publisher_id = '{}'".format(pub.name))
+                models.Event.database.execute_sql("delete from publisher where name = '{}'".format(pub.name))
+                models.Event.database.execute_sql("delete from event_type where publisher_id = 'EventHubConsole' and name = 'pub_{}'".format(pub.name))
 
 
 class SinglePubSubTest(BaseTest):
@@ -88,38 +92,80 @@ class SinglePubSubTest(BaseTest):
         super().__init__(name,desc,pub=Publisher('Pub_Test','test_event'),sub=Subscriber('Sub_Test'))
 
 class BasicPubSubTest(SinglePubSubTest):
-    def __init__(self):
-        super().__init__("Basic Pub/Sub Testing","Test basic publish/subscribe event")
+    def __init__(self,name="Basic Pub/Sub Testing",desc="Test basic publish/subscribe event"):
+        super().__init__(name,desc)
+
     def test(self):
         now = timezone.now()
         events = []
-        unknown_events=[]
         def _process(event):
-            if event.publisher == self.pub.publisher and event.event_type == self.pub.event_type and event.payload == events[0]:
-                del events[0]
-                self.print_event(event)
-            else:
-                unknown_events.append(event)
-    
+            self.print_event(event)
+            if event.id in pending_events :
+                del pending_events[event.id]
                 
         self.sub.subscribe('test_event',callback=_process)
+        self.sub.start()
     
         events = ["{}: Hello Eason".format(now),"{}: How are going today.".format(now)]
+        published_events = {}
         for e in events:
-            self.pub.publish(e)
+            event = self.pub.publish(e)
+            published_events[event.id] = event
+        pending_events = dict(published_events)
     
         waited_times = 0
-        while len(events) > 0 and waited_times < 20:
+        while len(pending_events) > 0 and waited_times < 20:
             time.sleep(1)
             waited_times += 1
     
+        assert len(pending_events) == 0,"Events ({}) are not processed".format(pending_events.values())
+
+        subscribed_events = models.SubscribedEvent.select().where(models.SubscribedEvent.event << [v for v in published_events.values()])
+        assert len(events) == len(subscribed_events),"Only {}/{} events were processed".format(len(subscribed_events),len(events))
+
+        succeed_subscribed_events = subscribed_events.where(models.SubscribedEvent.status == models.SubscribedEvent.SUCCEED)
+        assert len(events) == len(subscribed_events),"Only {}/{} events were processed successfully".format(len(subscribed_events),len(events))
+
+class FailedProcessingTest(SinglePubSubTest):
+    def __init__(self,name="Failed Processing Testing",desc="Test event processing unsuccessfully"):
+        super().__init__(name,desc)
+
+    def test(self):
+        now = timezone.now()
+        events = []
+        def _process(event):
+            self.print_event(event)
+            if event.id in pending_events :
+                del pending_events[event.id]
+
+            raise Exception("Failed processing testing")
+                
+        self.sub.subscribe('test_event',callback=_process)
+        self.sub.start()
     
-        assert len(events) == 0,"Events ({}) are not processed".format(events)
-        assert len(unknown_events) == 0,"Found unknown events.{}".format(unknown_events)
+        events = ["{}: Hello Eason".format(now),"{}: How are going today.".format(now)]
+        published_events = {}
+        for e in events:
+            event = self.pub.publish(e)
+            published_events[event.id] = event
+        pending_events = dict(published_events)
+    
+        waited_times = 0
+        while len(pending_events) > 0 and waited_times < 20:
+            time.sleep(1)
+            waited_times += 1
+    
+        assert len(pending_events) == 0,"Events ({}) are not processed".format(pending_events.values())
+
+        subscribed_events = models.SubscribedEvent.select().where(models.SubscribedEvent.event << [v for v in published_events.values()])
+        assert len(events) == len(subscribed_events),"Only {}/{} events were processed".format(len(subscribed_events),len(events))
+
+        failed_subscribed_events = subscribed_events.where(models.SubscribedEvent.status == models.SubscribedEvent.FAILED)
+        assert len(events) == len(subscribed_events),"Only {}/{} events were processed unsuccessfully".format(len(subscribed_events),len(events))
 
 def test_all():
     BasicPubSubTest()()
-
+    FailedProcessingTest()()
 
 
 test_all()

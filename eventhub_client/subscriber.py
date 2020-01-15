@@ -185,7 +185,7 @@ class Subscriber(object):
                 )
             )
             for event in failed_events:
-                self._event_types[event_type_name][2].add(event)
+                self._event_types[event_type_name][2].add(event.event)
 
     def process_event(self,event):
         """
@@ -360,6 +360,7 @@ payload={}
             with self.connection.cursor() as cur:
                 #listen pg notification
                 cur.execute('LISTEN "{}";'.format(event_type_name))
+                logger.info("Listen to {}".format(event_type_name))
 
         return True
 
