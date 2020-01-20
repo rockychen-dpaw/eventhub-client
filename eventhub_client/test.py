@@ -35,12 +35,13 @@ class BaseTest(object):
     def print_event(event):
         print("""
 Process the event.
+ID={} 
 Publisher={} 
 Event Type={} 
 source={} 
 publish time={} 
 payload={}
-""".format(event.publisher.name,event.event_type.name,event.source,event.publish_time,event.payload))
+""".format(event.id,event.publisher.name,event.event_type.name,event.source,event.publish_time,event.payload))
 
     def __call__(self):
         try:
@@ -90,7 +91,47 @@ payload={}
 
 class SinglePubSubTest(BaseTest):
     def __init__(self,name,desc,database=None):
-        super().__init__(name,desc,pub=Publisher('Pub_Unitest','unitest_event'),sub=Subscriber('Sub_Unitest'))
+        with models.Publisher.database:
+            pub,created=models.Publisher.get_or_create(name='Pub_Unitest',defaults={
+                'category':models.UNITESTING,
+                'active':True,
+                'commetns':'For unitesting',
+                'active_modifier':models.User.PROGRAMMATIC,
+                'active_modified':timezone.now(),
+                'modifier':models.User.PROGRAMMATIC,
+                'modified':timezone.now(),
+                'creator':models.User.PROGRAMMATIC,
+                'created':timezone.now(),
+            })
+            event_type,created=models.EventType.get_or_create(name='unitest_event',defaults={
+                'publisher':pub,
+                'category':models.UNITESTING,
+                'active':True,
+                'comments':'For unitesting',
+                'active_modifier':models.User.PROGRAMMATIC,
+                'active_modified':timezone.now(),
+                'modifier':models.User.PROGRAMMATIC,
+                'modified':timezone.now(),
+                'creator':models.User.PROGRAMMATIC,
+                'created':timezone.now(),
+            })
+            sub,created=models.Subscriber.get_or_create(name='Sub_Unitest',defaults={
+                'category':models.UNITESTING,
+                'active':True,
+                'commetns':'For unitesting',
+                'active_modifier':models.User.PROGRAMMATIC,
+                'active_modified':timezone.now(),
+                'modifier':models.User.PROGRAMMATIC,
+                'modified':timezone.now(),
+                'creator':models.User.PROGRAMMATIC,
+                'created':timezone.now(),
+            })
+        super().__init__(
+            name,
+            desc,
+            pub=Publisher(pub,event_type),
+            sub=Subscriber(sub)
+        )
 
 class BasicPubSubTest(SinglePubSubTest):
     def __init__(self,name="Basic Pub/Sub Testing",desc="Test basic publish/subscribe event"):
@@ -98,24 +139,29 @@ class BasicPubSubTest(SinglePubSubTest):
 
     def test(self):
         now = timezone.now()
-        events = []
+        processed_events = []
+        events = ["{}: Hello Eason".format(now),"{}: How are going today.".format(now),"{}: bye".format(now)]#,"{}: bye1".format(now),"{}: bye2".format(now)]
+        published_events = {}
         def _process(event):
             self.print_event(event)
-            if event.id in pending_events :
-                del pending_events[event.id]
-                
-        self.sub.subscribe('test_event',callback=_process)
+            #time.sleep(10)
+            processed_events.append(event.id)
+
+        self.sub.subscribe('unitest_event',callback=_process)
         self.sub.start()
     
-        events = ["{}: Hello Eason".format(now),"{}: How are going today.".format(now)]
-        published_events = {}
         for e in events:
             event = self.pub.publish(e)
+            print("publish event {}".format(event))
             published_events[event.id] = event
         pending_events = dict(published_events)
     
         waited_times = 0
-        while len(pending_events) > 0 and waited_times < 20:
+        while len(pending_events) > 0 and waited_times < 10 * (len(events) + 1):
+            for e in processed_events:
+                if e in pending_events:
+                    del pending_events[e]
+
             time.sleep(1)
             waited_times += 1
     
@@ -134,17 +180,17 @@ class FailedProcessingTest(SinglePubSubTest):
     def test(self):
         now = timezone.now()
         events = []
+        processed_events = []
         def _process(event):
             self.print_event(event)
-            if event.id in pending_events :
-                del pending_events[event.id]
-
+            #time.sleep(10)
+            processed_events.append(event.id)
             raise Exception("Failed processing testing")
                 
-        self.sub.subscribe('test_event',callback=_process)
+        self.sub.subscribe('unitest_event',callback=_process)
         self.sub.start()
     
-        events = ["{}: Hello Eason".format(now),"{}: How are going today.".format(now)]
+        events = ["{}: Hello Eason".format(now),"{}: How are going today.".format(now),"{}: bye".format(now)]
         published_events = {}
         for e in events:
             event = self.pub.publish(e)
@@ -152,12 +198,17 @@ class FailedProcessingTest(SinglePubSubTest):
         pending_events = dict(published_events)
     
         waited_times = 0
-        while len(pending_events) > 0 and waited_times < 20:
+        while len(pending_events) > 0 and waited_times < 10 * (len(events) + 1):
+            for e in processed_events:
+                if e in pending_events:
+                    del pending_events[e]
+
             time.sleep(1)
             waited_times += 1
     
         assert len(pending_events) == 0,"Events ({}) are not processed".format(pending_events.values())
 
+        
         subscribed_events = models.SubscribedEvent.select().where(models.SubscribedEvent.event << [v for v in published_events.values()])
         assert len(events) == len(subscribed_events),"Only {}/{} events were processed".format(len(subscribed_events),len(events))
 

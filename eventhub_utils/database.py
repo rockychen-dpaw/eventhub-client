@@ -1,6 +1,13 @@
 import peewee
 import playhouse.pool
 import playhouse.postgres_ext
+import threading
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+_localdata = threading.local()
 
 class ActiveContext(object):
     def __init__(self,database):
@@ -8,12 +15,23 @@ class ActiveContext(object):
 
         
     def __enter__(self):
-        self.database.active_connect()
-        self.database.__enter__()
+        if not hasattr(_localdata,'active_context'):
+            _localdata.active_context = 0
+        if _localdata.active_context == 0:
+            self.database.active_connect()
+            self.database.__enter__()
+            logger.debug("{}: {}- Connect to database".format(id(threading.current_thread()),self.database))
+
+        _localdata.active_context += 1
+
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.database.__exit__(exc_type,exc_val,exc_tb)
+        if _localdata.active_context == 1:
+            self.database.__exit__(exc_type,exc_val,exc_tb)
+            logger.debug("{}: {}- Disconnect to database".format(id(threading.current_thread()),self.database))
+
+        _localdata.active_context -= 1
 
 class IsActiveMixin(object):
     @property
@@ -65,6 +83,7 @@ class PostgresqlExtDatabase(IsActiveMixin,playhouse.postgres_ext.PostgresqlExtDa
                         self.close()
                     except:
                         pass
+                    print("reconect to the database")
                     #reconnect the database
                     result = super().connect()
                     #check whether connection is active or not,if inactive, throw exception directly
@@ -102,6 +121,7 @@ class PooledPostgresqlExtDatabase(IsActiveMixin,playhouse.pool.PooledPostgresqlE
         else:
             if self.clean_if_inactive():
                 #connection is inactive,reget again.
+                print("cleaned broken connection pool")
                 result = super().connect()
                 #check connection again, if failed, database is not running or have connection issue.
                 self.check_active()

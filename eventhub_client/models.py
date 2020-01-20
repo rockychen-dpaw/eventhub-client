@@ -7,6 +7,20 @@ from eventhub_utils import timezone,cachedclassproperty,classproperty
 
 from . import settings
 
+PROGRAMMATIC = 1
+MANAGED = 2
+SYSTEM = 999
+TESTING = -1
+UNITESTING = -2
+    
+CATEGORY_CHOICES = (
+    (PROGRAMMATIC,"Programmatic"),
+    (MANAGED,"Managed"),
+    (SYSTEM,"System"),
+    (TESTING,"Testing"),
+    (UNITESTING,"Unitesting")
+)
+
 class BaseModel(models.Model):
     @classproperty
     def table_name(cls):
@@ -28,11 +42,52 @@ class BaseModel(models.Model):
         database = settings.DatabasePool.default 
         legacy_table_names = False
 
-class Publisher(BaseModel):
-    name = models.CharField(max_length=32,null=False,primary_key=True)
+class User(BaseModel):
+    username = models.CharField(max_length=128)
+    first_name = models.CharField( max_length=30, )
+    last_name = models.CharField(max_length=150)
+    email = models.CharField(max_length=128)
+    is_staff = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    date_joined = models.DateTimeField(default=timezone.now)
+    password = models.CharField(max_length=128)
+    last_login = models.DateTimeField(null=True)
+    is_superuser = models.BooleanField(default=False)
+    
+
+    class Meta:
+        table_name = 'auth_user'
+
+try:
+    User.PROGRAMMATIC,created = User.get_or_create(username="Programattic",defaults={
+        'password':'',
+        'is_superuser':False,
+        'is_staff':False,
+        'first_name':'Programmatic',
+        'last_name':'',
+        'email':'',
+    })
+except:
+    pass
+
+
+class AuditModel(BaseModel):
+    creator = models.ForeignKeyField(User,null=False)
+    created = models.DateTimeField(default=timezone.now)
+    modifier = models.ForeignKeyField(User,null=False)
+    modified = models.DateTimeField(default=timezone.now)
+
+
+class ActiveModel(AuditModel):
     active = models.BooleanField(default=True)
+    active_modifier = models.ForeignKeyField(User,null=False)
+    active_modified = models.DateTimeField(null=True)
+    
+
+class Publisher(ActiveModel):
+    name = models.CharField(max_length=32,null=False,primary_key=True)
+    category = models.SmallIntegerField(default=MANAGED,choices=CATEGORY_CHOICES)
     comments = models.TextField(null=True)
-    register_time = models.DateTimeField(default=timezone.now)
 
     def __str__(self):
         return self.name
@@ -40,14 +95,12 @@ class Publisher(BaseModel):
     class Meta:
         table_name = 'publisher'
 
-class EventType(BaseModel):
+class EventType(ActiveModel):
     name = models.CharField(max_length=32,null=False,primary_key=True)
     publisher = models.ForeignKeyField(Publisher,null=False,backref="event_types")
-    managed = models.BooleanField(default=True)
-    active = models.BooleanField(default=True)
+    category = models.SmallIntegerField(default=MANAGED,choices=CATEGORY_CHOICES)
     comments = models.TextField(null=True)
     sample = JSONField(null=True)
-    register_time = models.DateTimeField(default=timezone.now)
 
     def __str__(self):
         return "{}.{}".format(self.publisher,self.name)
@@ -71,11 +124,24 @@ class Event(BaseModel):
     class Meta:
         table_name = 'event'
 
-class Subscriber(BaseModel):
-    name = models.CharField(max_length=32,null=False,primary_key=True)
-    active = models.BooleanField(default=True)
+class EventProcessingModule(ActiveModel):
+    name = models.CharField(max_length=64,null=False,unique=True)
+    code = models.TextField(null=True)
+    parameters = models.TextField(null=True)
     comments = models.TextField(null=True)
-    register_time = models.DateTimeField(default=timezone.now)
+
+
+    def __str__(self):
+        return self.name
+
+    class Meta(object):
+        db_table = "event_processing_module"
+
+
+class Subscriber(ActiveModel):
+    name = models.CharField(max_length=32,null=False,primary_key=True)
+    category = models.SmallIntegerField(default=MANAGED,choices=CATEGORY_CHOICES)
+    comments = models.TextField(null=True)
 
     def __str__(self):
         return self.name
@@ -83,15 +149,23 @@ class Subscriber(BaseModel):
     class Meta:
         table_name = 'subscriber'
 
-class SubscribedEventType(BaseModel):
+class SubscribedEventType(ActiveModel):
     subscriber = models.ForeignKeyField(Subscriber,null=False,backref="event_types")
     publisher = models.ForeignKeyField(Publisher,null=False,backref="subscribed_publisher_event_types")
     event_type = models.ForeignKeyField(EventType,null=False,backref="subscribed_event_types")
-    managed = models.BooleanField(default=True)
-    active = models.BooleanField(default=True)
+    category = models.SmallIntegerField(default=MANAGED,choices=CATEGORY_CHOICES)
+    event_processing_module = models.ForeignKeyField(EventProcessingModule,null=True)
+    parameters = JSONField(null=True)
     last_dispatched_event = models.ForeignKeyField(Event,null=True)
     last_dispatched_time = models.DateTimeField(null=True)
-    register_time = models.DateTimeField(default=timezone.now)
+
+    @property
+    def is_system_event_type(self):
+        return self.category == SYSTEM
+
+    @property
+    def is_editable(self):
+        return self.category in (MANAGED,TESTING)
 
     def __str__(self):
         return "{} subscribes {}".format(self.subscriber,self.event_type)

@@ -108,16 +108,57 @@ class Worker(Thread):
 
 
 class Subscriber(object):
-    def __init__(self,subscriber,database=None,select_timeout=5,replay_missing_events=True):
-        with models.Subscriber.database.active_context():
-            self.subscriber,created = models.Subscriber.get_or_create(name=subscriber)
+    def __init__(self,subscriber,database=None,select_timeout=5,process_missed_events=True):
+        if isinstance(subscriber,models.Subscriber):
+            self.subscriber = subscriber
+        else:
+            with models.Subscriber.database.active_context():
+                self.subscriber,created = models.Subscriber.get_or_create(name=subscriber,defaults={
+                    'category':models.PROGRAMMATIC,
+                    'active':True,
+                    'active_modifier':models.User.PROGRAMMATIC,
+                    'active_modified':timezone.now(),
+                    'modifier':models.User.PROGRAMMATIC,
+                    'modified':timezone.now(),
+                    'creator':models.User.PROGRAMMATIC,
+                    'created':timezone.now(),
+                })
 
         self._host = settings.HOSTNAME
         self._database = database or settings.Database.Default.get("listen",thread_safe=False)
         self._connection = None
         self._select_timeout = select_timeout
         self._event_types = {}
-        self._replay_missing_events = replay_missing_events
+        self._process_missed_events = process_missed_events
+        #automatically listen to managed events
+        with models.SubscribedEventType.database.active_context():
+            managed_event_types = models.SubscribedEventType.select().where(
+                (models.SubscribedEventType.subscriber == self.subscriber) &
+                (models.SubscribedEventType.active == True) &
+                (models.SubscribedEventType.category == models.MANAGED) 
+            )
+            for event_type in managed_event_types:
+                if not event_type.event_processing_module:
+                    #no event processing module, ignore
+                    continue
+                if event_type.event_processing_module.code:
+                    try:
+                        module_name = "event_{}".format(hashvalue('{}_{}'.format(self.subscriber.name,event_type.name)))
+                        m = imp.new_module(module_name)
+                        exec(event_type.event_processing_module.code,m.__dict__)
+                        if not hasattr(m,"process"):
+                            #no event processing method
+                            raise Exception("'process' method is not found in event processing module({})".format(event_type.event_processing_module.name))
+                        if event_type.event_processing_module.parameters and not event_type.parameters:
+                            #not configured the parameters, ignore
+                            continue
+                        for k,v in event_type.parameters:
+                            setattr(m,k,v)
+                        self.subscribe(event_type,m.process)
+
+                    except:
+                        logger.error(traceback.format_exc())
+
         self._listener = Listener(self)
         self._replay_failed_events_worker = ReplayFailedEventsWorker(self)
         self._shutdown = False
@@ -158,27 +199,27 @@ class Subscriber(object):
             self.shutdown()
 
 
-    def _replay_missed_events(self,event_type_name,subscribed_eventtype):
+    def _replay_missed_events(self,event_type_name,subscribed_event_type):
         with models.Event.database.active_context():
-            if subscribed_eventtype.last_dispatched_event:
+            if subscribed_event_type.last_dispatched_event:
                 missing_events = models.Event.select().where(
-                    (models.Event.event_type == subscribed_eventtype.event_type) &
-                    (models.Event.id > subscribed_eventtype.last_dispatched_event.id)
+                    (models.Event.event_type == subscribed_event_type.event_type) &
+                    (models.Event.id > subscribed_event_type.last_dispatched_event.id)
                 )
             else:
                 missing_events = models.Event.select().where(
-                    (models.Event.event_type == subscribed_eventtype.event_type)
+                    (models.Event.event_type == subscribed_event_type.event_type)
                 )
 
             for event in missing_events:
                 self._event_types[event_type_name][2].add(event)
 
-    def _replay_failed_events(self,event_type_name,subscribed_eventtype):
+    def _replay_failed_events(self,event_type_name,subscribed_event_type):
         with models.SubscribedEvent.database.active_context():
             failed_events = models.SubscribedEvent.select().where(
-                (models.SubscribedEvent.subscriber == subscribed_eventtype.subscriber) &
-                (models.SubscribedEvent.publisher == subscribed_eventtype.publisher) & 
-                (models.SubscribedEvent.event_type == subscribed_eventtype.event_type) &
+                (models.SubscribedEvent.subscriber == subscribed_event_type.subscriber) &
+                (models.SubscribedEvent.publisher == subscribed_event_type.publisher) & 
+                (models.SubscribedEvent.event_type == subscribed_event_type.event_type) &
                 ( 
                     ((models.SubscribedEvent.status == models.SubscribedEvent.PROCESSING) & (models.SubscribedEvent.process_start_time < timezone.now() - models.SubscribedEvent.PROCESSING_TIMEOUT)) |
                     (models.SubscribedEvent.status < 0)
@@ -306,8 +347,28 @@ class Subscriber(object):
         Return true if subscribed successfully; return False if already subscribed
         """
         with models.EventType.database.active_context():
-            if not isinstance(event_type,models.EventType):
-                event_type = models.EventType.get_by_id(event_type)
+            if isinstance(event_type,models.SubscribedEventType):
+                subscribed_event_type = event_type
+                event_type = subscribed_event_type.event_type
+            else:
+                if not isinstance(event_type,models.EventType):
+                    event_type = models.EventType.get_by_id(event_type)
+
+                subscribed_event_type,created = models.SubscribedEventType.get_or_create(
+                    subscriber=self.subscriber,
+                    publisher=event_type.publisher,
+                    event_type=event_type,
+                    defaults={
+                        'category':self.subscriber.category,
+                        'active':True,
+                        'active_modifier':models.User.PROGRAMMATIC,
+                        'active_modified':timezone.now(),
+                        'modifier':models.User.PROGRAMMATIC,
+                        'modified':timezone.now(),
+                        'creator':models.User.PROGRAMMATIC,
+                        'created':timezone.now(),
+                    }
+                )
 
             event_type_name = '{}.{}'.format(event_type.publisher.name,event_type.name)
             if event_type_name in self._event_types and not resubscribe:
@@ -321,18 +382,6 @@ source={}
 publish time={} 
 payload={}
 """.format(event.publisher.name,event.event_type.name,event.source,event.publish_time,event.payload)))
-
-            event_type_name = '{}.{}'.format(event_type.publisher.name,event_type.name)
-
-            subscribed_eventtype,created = models.SubscribedEventType.get_or_create(
-                subscriber=self.subscriber,
-                publisher=event_type.publisher,
-                event_type=event_type,
-                defaults={
-                    'managed':True,
-                    'active':True
-                }
-            )
 
             if event_type_name in self._event_types:
                 worker = self._event_types[event_type_name][2]
@@ -353,9 +402,9 @@ payload={}
                 self._event_types[event_type_name][1] = callback
                 self._event_types[event_type_name][2] = worker
             else:
-                self._event_types[event_type_name] = [subscribed_eventtype,callback,worker]
-            self._replay_failed_events(event_type_name,subscribed_eventtype)
-            self._replay_missed_events(event_type_name,subscribed_eventtype)
+                self._event_types[event_type_name] = [subscribed_event_type,callback,worker]
+            self._replay_failed_events(event_type_name,subscribed_event_type)
+            self._replay_missed_events(event_type_name,subscribed_event_type)
             
             with self.connection.cursor() as cur:
                 #listen pg notification
@@ -404,17 +453,18 @@ payload={}
                     pass
                 else:
                     self.connection.poll()
-                    with models.EventType.database.active_context():
-                        while self.connection.notifies:
-                            notify_event = self.connection.notifies.pop(0)
-                            event_type_name = notify_event.channel
-                            if event_type_name not in self._event_types:
-                                #not listening this event type. skip
-                                logger.info("The subscriber({}) is not listening this event type ({}), skip the event({}).".format(self.subscriber,event_type_name,json.dumps(notify_event)))
-                                continue
-                            #get the event object
-                            notify_payload = json.loads(notify_event.payload)
-                            self._event_types[event_type_name][2].add(notify_payload['id'])
+                    while self.connection.notifies:
+                        notify_event = self.connection.notifies.pop(0)
+                        event_type_name = notify_event.channel
+                        print("{}:{} in {}".format(event_type_name,notify_event,self._event_types.keys()))
+                        
+                        if event_type_name not in self._event_types:
+                            #not listening this event type. skip
+                            logger.info("The subscriber({}) is not listening this event type ({}), skip the event({}).".format(self.subscriber,event_type_name,json.dumps(notify_event)))
+                            continue
+                        #get the event object
+                        notify_payload = json.loads(notify_event.payload)
+                        self._event_types[event_type_name][2].add(notify_payload['id'])
             except:
                 #check whether the connection is broken or not
                 self._database.clean_if_inactive()

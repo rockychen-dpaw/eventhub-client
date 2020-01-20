@@ -2,6 +2,8 @@ from datetime import datetime
 import pytz
 import json
 import re
+import hashlib
+
 from . import decorators
 from . import database
 
@@ -10,6 +12,12 @@ from . import timezone
 from .env import env
 
 from .classproperty import classproperty,cachedclassproperty
+
+
+def hashvalue(value):
+    m = hashlib.sha1()
+    m.update(value.encode('utf-8'))
+    return m.hexdigest()
 
 class JSONEncoder(json.JSONEncoder):
     """
