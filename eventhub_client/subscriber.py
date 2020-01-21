@@ -19,9 +19,10 @@ NOT_READY = ([], [], [])
 
 class ReplayFailedEventsWorker(Thread):
     def __init__(self,subscriber):
-        super().__init__(name="Replay Failed Events Worker {}".format(subscriber.subscriber.name))
+        super().__init__(name="Replay Failed Events Worker {}".format(subscriber.subscriber.name),daemon=False)
         self.subscriber = subscriber
         self._shutdown = False
+        self._running = None
 
     def shutdown(self):
         self._shutdown=True
@@ -32,7 +33,15 @@ class ReplayFailedEventsWorker(Thread):
     def is_shutdown_requested(self):
         return self._shutdown
 
+    def is_alive(self):
+        return True if self._running else False
+
+    def join(self):
+        while self._running:
+            time.sleep(0.1)
+
     def run(self):
+        self._running = True
         logger.info("Retrieve Failed Events for {} is running".format(self.subscriber.subscriber.name))
         try:
             waited_seconds = 0
@@ -46,39 +55,61 @@ class ReplayFailedEventsWorker(Thread):
         except KeyboardInterrupt:
             pass
         logger.info("Retrieve Failed Events for {} is end".format(self.subscriber.subscriber.name))
+        self._running = False
 
 class Listener(Thread):
     def __init__(self,subscriber):
-        super().__init__(name="Listener {}".format(subscriber.subscriber.name))
+        super().__init__(name="Listener {}".format(subscriber.subscriber.name),daemon=False)
         self.subscriber = subscriber
+        self._running = None
+
+    def is_alive(self):
+        return True if self._running else False
+
+    def join(self):
+        while self._running:
+            time.sleep(0.1)
 
     def run(self):
+        self._running = True
         logger.info("Event listener for {} is running".format(self.subscriber.subscriber.name))
         try:
             self.subscriber.listen()
         finally:
             self.subscriber.close()
         logger.info("Event listener for {} is end".format(self.subscriber.subscriber.name))
+        self._running = False
 
 class Worker(Thread):
     def __init__(self,subscriber,event_type_name):
-        super().__init__(name="Worker {}.{} ".format(subscriber.subscriber.name,event_type_name))
+        super().__init__(name="Worker {}.{} ".format(subscriber.subscriber.name,event_type_name),daemon=False)
         self.subscriber = subscriber
         self.event_type_name = event_type_name
         self._queue = queue.Queue()
         self._shutdown = False
+        self._running = None
+
+    def is_alive(self):
+        return True if self._running else False
+
+    def join(self):
+        while self._running:
+            time.sleep(0.1)
 
     def run(self):
-        logger.info("The worker thread for {}.{} is running".format(self.subscriber.subscriber.name,self.event_type_name))
+        self._running = True
+        logger.info("The worker thread for {}->{} is running".format(self.subscriber.subscriber.name,self.event_type_name))
         while True:
             event = None
             try:
                 event = self._queue.get(block=True,timeout=2)
+                logger.debug("Got Event({} for )({}->{})".format(event,self.subscriber.subscriber.name,self.event_type_name))
                 processed = self.subscriber.process_event(event)
                 if not processed:
                     #event is not processed, add to the end of the queue again.
                     self._queue.put(event)
             except queue.Empty:
+                #logger.debug("Event queue({}->{}) is empty,shutdown={}".format(self.subscriber.subscriber.name,self.event_type_name,self._shutdown))
                 if self._shutdown:
                     #no more event to processing,and user already requests to shutdown
                     break
@@ -92,7 +123,8 @@ class Worker(Thread):
                 if event:
                     self._queue.put(event)
 
-        logger.info("The worker thread for {}.{} is end".format(self.subscriber.subscriber.name,self.event_type_name))
+        logger.info("The worker thread for {}->{} is end".format(self.subscriber.subscriber.name,self.event_type_name))
+        self._running = False
 
     def add(self,event):
         self._queue.put(event)
@@ -108,13 +140,16 @@ class Worker(Thread):
 
 
 class Subscriber(object):
-    def __init__(self,subscriber,database=None,select_timeout=5,process_missed_events=True):
+    def __init__(self,subscriber,database=None,select_timeout=5,process_missed_events=True,category=models.PROGRAMMATIC):
         if isinstance(subscriber,models.Subscriber):
             self.subscriber = subscriber
+        elif category == models.MANAGED:
+            with models.Subscriber.database.active_context():
+                self.subscriber = models.Subscriber.get_by_id(subscriber)
         else:
             with models.Subscriber.database.active_context():
                 self.subscriber,created = models.Subscriber.get_or_create(name=subscriber,defaults={
-                    'category':models.PROGRAMMATIC,
+                    'category':category,
                     'active':True,
                     'active_modifier':models.User.PROGRAMMATIC,
                     'active_modified':timezone.now(),
@@ -125,7 +160,7 @@ class Subscriber(object):
                 })
 
         self._host = settings.HOSTNAME
-        self._database = database or settings.Database.Default.get("listen",thread_safe=False)
+        self._database = database or settings.Database.Default.get("listener_{}".format(self.subscriber.name),thread_safe=False)
         self._connection = None
         self._select_timeout = select_timeout
         self._event_types = {}
@@ -138,26 +173,17 @@ class Subscriber(object):
                 (models.SubscribedEventType.category == models.MANAGED) 
             )
             for event_type in managed_event_types:
-                if not event_type.event_processing_module:
+                if not event_type.callback:
                     #no event processing module, ignore
                     continue
-                if event_type.event_processing_module.code:
-                    try:
-                        module_name = "event_{}".format(hashvalue('{}_{}'.format(self.subscriber.name,event_type.name)))
-                        m = imp.new_module(module_name)
-                        exec(event_type.event_processing_module.code,m.__dict__)
-                        if not hasattr(m,"process"):
-                            #no event processing method
-                            raise Exception("'process' method is not found in event processing module({})".format(event_type.event_processing_module.name))
-                        if event_type.event_processing_module.parameters and not event_type.parameters:
-                            #not configured the parameters, ignore
-                            continue
-                        for k,v in event_type.parameters:
-                            setattr(m,k,v)
-                        self.subscribe(event_type,m.process)
+                try:
+                    if not event_type.callback:
+                        #no event processing module, ignore
+                        continue
+                    self.subscribe(event_type,event_type.callback,auto_subscribe=True)
 
-                    except:
-                        logger.error(traceback.format_exc())
+                except:
+                    logger.error(traceback.format_exc())
 
         self._listener = Listener(self)
         self._replay_failed_events_worker = ReplayFailedEventsWorker(self)
@@ -177,7 +203,7 @@ class Subscriber(object):
             self._connection.autocommit = True
 
             for event_type_name,value in self._event_types.items():
-                self.subscribe(value[0].event_type,value[1],resubscribe=True)
+                self.subscribe(value[0].event_type,value[1],resubscribe=True,auto_subscribe=True)
 
         return self._connection
 
@@ -189,7 +215,8 @@ class Subscriber(object):
         if not self._listener.is_alive():
             self.close()
         elif not async:
-            self._listener.join()
+            if self._listener.is_alive():
+                self._listener.join()
 
     def wait_to_shutdown(self):
         if self._shutdown:
@@ -342,9 +369,24 @@ class Subscriber(object):
 
         return True
 
-    def subscribe(self,event_type,callback=None,resubscribe=True):
+    def subscribed(self,event_type):
+        if isinstance(event_type,models.SubscribedEventType):
+            event_type = subscribed_event_type.event_type
+        elif not isinstance(event_type,models.EventType):
+            with models.EventType.database.active_context():
+                event_type = models.EventType.get_by_id(event_type)
+
+        event_type_name = '{}.{}'.format(event_type.publisher.name,event_type.name)
+
+        return event_type_name in self._event_types
+
+    @property
+    def has_subscription(self):
+        return True if self._event_types else False
+
+    def subscribe(self,event_type,callback=None,resubscribe=True,auto_subscribe=False):
         """
-        Return true if subscribed successfully; return False if already subscribed
+        Return (SubscribedEventType,True) if subscribed successfully; return (SubscribedEventType,False) if already subscribed
         """
         with models.EventType.database.active_context():
             if isinstance(event_type,models.SubscribedEventType):
@@ -373,9 +415,22 @@ class Subscriber(object):
             event_type_name = '{}.{}'.format(event_type.publisher.name,event_type.name)
             if event_type_name in self._event_types and not resubscribe:
                 #already subscribed
-                return False
+                return (subscribed_event_type,False)
 
-            callback = callback or (lambda event:print("""
+            if auto_subscribe:
+                if not callback:
+                    raise Exception("Missing callback for auto subscribed event type({})".format(subscribed_event_type))
+            elif subscribed_event_type.category == models.PROGRAMMATIC:
+                if not callback:
+                    raise Exception("Missing callback for programmatic subscribed event type({})".format(subscribed_event_type))
+            elif subscribed_event_type.category == models.MANAGED:
+                callback = subscribed_event_type.callback
+                if not callback:
+                    raise Exception("Missing callback for programmatic subscribed event type({})".format(subscribed_event_type))
+            else:
+                callback = callback or subscribed_event_type.callback
+                if not callback:
+                    callback = (lambda event:print("""
 Publisher={} 
 Event Type={} 
 source={} 
@@ -389,7 +444,8 @@ payload={}
                     worker = Worker(self,event_type_name)
                     worker.start()
                 elif worker.is_shutdown_requested:
-                    worker.join()
+                    if worker.is_alive():
+                        worker.join()
                     worker = Worker(self,event_type_name)
                     worker.start()
             else:
@@ -409,9 +465,9 @@ payload={}
             with self.connection.cursor() as cur:
                 #listen pg notification
                 cur.execute('LISTEN "{}";'.format(event_type_name))
-                logger.info("Listen to {}".format(event_type_name))
+            logger.info("Listen to {}".format(event_type_name))
 
-        return True
+        return (subscribed_event_type,True)
 
     def unsubscribe(self,event_type,remove=True):
         """
@@ -422,13 +478,14 @@ payload={}
                 if not isinstance(event_type,models.EventType):
                     event_type = models.EventType.get_by_id(event_type)
 
-                event_type_name = '{}.{}'.format(event_type.publisher.name,event_type.name)
-                if event_type_name not in self._event_types:
-                    #not subscribed
-                    return False
+            event_type_name = '{}.{}'.format(event_type.publisher.name,event_type.name)
+            if event_type_name not in self._event_types:
+                #not subscribed
+                return False
 
-                with self.connection.cursor() as cur:
-                    cur.execute('UNLISTEN "{}";'.format(event_type_name))
+            with self.connection.cursor() as cur:
+                cur.execute('UNLISTEN "{}";'.format(event_type_name))
+            logger.info("Stop listen to {}".format(event_type_name))
         except:
             pass
 
@@ -440,8 +497,12 @@ payload={}
 
         return True
 
+    @property
+    def started(self):
+        return self._listener and self._listener.is_alive()
 
     def start(self):
+        self._shutdown = False
         self._listener.start()
         self._replay_failed_events_worker.start()
 

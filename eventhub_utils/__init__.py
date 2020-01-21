@@ -3,6 +3,7 @@ import pytz
 import json
 import re
 import hashlib
+import traceback
 
 from . import decorators
 from . import database
@@ -13,6 +14,10 @@ from .env import env
 
 from .classproperty import classproperty,cachedclassproperty
 
+
+def print_callstack():
+    for line in traceback.format_stack()[:-2]:
+        print(line.strip())
 
 def hashvalue(value):
     m = hashlib.sha1()

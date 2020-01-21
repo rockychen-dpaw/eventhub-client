@@ -1,6 +1,7 @@
 import logging
 
 from eventhub_utils.decorators import (repeat_if_failed,)
+from eventhub_utils import timezone
 from . import settings
 from . import models
 

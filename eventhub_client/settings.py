@@ -35,7 +35,7 @@ class DatabasePool(object):
         password=DatabaseConfig.default["password"],
         host=DatabaseConfig.default["host"], 
         port=DatabaseConfig.default["port"],
-        max_connections=3,
+        max_connections=5,
         stale_timeout=300,
         timeout=5
     ) 

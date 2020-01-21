@@ -1,9 +1,10 @@
 from datetime import timedelta
+import imp
 
 import peewee as models
 from playhouse.postgres_ext import JSONField
 
-from eventhub_utils import timezone,cachedclassproperty,classproperty
+from eventhub_utils import timezone,cachedclassproperty,classproperty,hashvalue
 
 from . import settings
 
@@ -167,8 +168,40 @@ class SubscribedEventType(ActiveModel):
     def is_editable(self):
         return self.category in (MANAGED,TESTING)
 
+    @property
+    def callback_module(self):
+        """
+        Return the configured callback if have; otherwise, return None
+        throw exception if not configured properly.
+        """
+        if not hasattr(self,"_callback_module"):
+            if not self.event_processing_module or not self.event_processing_module.code:
+                #no event processing module, ignore
+                return None
+            else:
+                module_name = "event_{}".format(hashvalue('{}_{}'.format(self.subscriber.name,self.event_type.name)))
+                m = imp.new_module(module_name)
+                exec(self.event_processing_module.code,m.__dict__)
+                if not hasattr(m,"process"):
+                    #no event processing method
+                    raise Exception("'process' method is not found in event processing module({})".format(self.event_processing_module.name))
+                if self.event_processing_module.parameters and not self.parameters:
+                    #not configured the parameters, ignore
+                    raise Exception("Missing parameters for subscribed event type({})".format(self))
+                if self.parameters:
+                    for k,v in self.parameters.items():
+                        setattr(m,k,v)
+                self._callback_module = m
+
+        return self._callback_module
+
+    @property
+    def callback(self):
+        _module = self.callback_module
+        return _module.process if _module else None
+
     def __str__(self):
-        return "{} subscribes {}".format(self.subscriber,self.event_type)
+        return "{} << {}".format(self.subscriber,self.event_type)
 
     class Meta:
         table_name = 'subscribed_event_type'
