@@ -140,9 +140,10 @@ class BasicPubSubTest(SinglePubSubTest):
     def test(self):
         now = timezone.now()
         processed_events = []
-        events = ["{}: Hello Eason".format(now),"{}: How are going today.".format(now),"{}: bye".format(now)]#,"{}: bye1".format(now),"{}: bye2".format(now)]
+        events = [{"data":"{}: Hello Eason".format(now)},"{}: How are going today.".format(now),"{}: bye".format(now),90,12.23,False]#,"{}: bye1".format(now),"{}: bye2".format(now)]
         published_events = {}
         def _process(event):
+            print("The class of {} is {}".format(event.payload,event.payload.__class__))
             self.print_event(event)
             #time.sleep(10)
             processed_events.append(event.id)
