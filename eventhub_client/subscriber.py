@@ -48,7 +48,7 @@ class ReplayFailedEventsWorker(Thread):
             while not self._shutdown:
                 time.sleep(1)
                 waited_seconds += 1
-                if waited_seconds >= models.SubscribedEvent.PROCESSING_TIMEOUT.seconds:
+                if waited_seconds >= models.SubscribedEvent.REPROCESSING_INTERVAL.seconds:
                     for event_type_name,value in self.subscriber._event_types.items():
                         self.subscriber._replay_failed_events(event_type_name,value[0])
                     waited_seconds = 0
@@ -227,6 +227,8 @@ class Subscriber(object):
 
 
     def _replay_missed_events(self,event_type_name,subscribed_event_type):
+        if not subscribed_event_type.replay_missed_events:
+            return
         with models.Event.database.active_context():
             if subscribed_event_type.last_dispatched_event:
                 missing_events = models.Event.select().where(
@@ -242,16 +244,30 @@ class Subscriber(object):
                 self._event_types[event_type_name][2].add(event)
 
     def _replay_failed_events(self,event_type_name,subscribed_event_type):
+        if not subscribed_event_type.replay_failed_events:
+            return
         with models.SubscribedEvent.database.active_context():
-            failed_events = models.SubscribedEvent.select().where(
-                (models.SubscribedEvent.subscriber == subscribed_event_type.subscriber) &
-                (models.SubscribedEvent.publisher == subscribed_event_type.publisher) & 
-                (models.SubscribedEvent.event_type == subscribed_event_type.event_type) &
-                ( 
-                    ((models.SubscribedEvent.status == models.SubscribedEvent.PROCESSING) & (models.SubscribedEvent.process_start_time < timezone.now() - models.SubscribedEvent.PROCESSING_TIMEOUT)) |
-                    (models.SubscribedEvent.status < 0)
+            if subscribed_event_type.replay_missed_events:
+                failed_events = models.SubscribedEvent.select().where(
+                    (models.SubscribedEvent.subscriber == subscribed_event_type.subscriber) &
+                    (models.SubscribedEvent.publisher == subscribed_event_type.publisher) & 
+                    (models.SubscribedEvent.event_type == subscribed_event_type.event_type) &
+                    ( 
+                        ((models.SubscribedEvent.status == models.SubscribedEvent.PROCESSING) & (models.SubscribedEvent.process_start_time < timezone.now() - models.SubscribedEvent.PROCESSING_TIMEOUT)) |
+                        (models.SubscribedEvent.status < 0)
+                    )
                 )
-            )
+            else:
+                failed_events = models.SubscribedEvent.select().where(
+                    (models.SubscribedEvent.subscriber == subscribed_event_type.subscriber) &
+                    (models.SubscribedEvent.publisher == subscribed_event_type.publisher) & 
+                    (models.SubscribedEvent.event_type == subscribed_event_type.event_type) &
+                    (models.SubscribedEvent.process_start_time > subscribed_event_type.last_listening_time) &
+                    ( 
+                        ((models.SubscribedEvent.status == models.SubscribedEvent.PROCESSING) & (models.SubscribedEvent.process_start_time < timezone.now() - models.SubscribedEvent.PROCESSING_TIMEOUT)) |
+                        (models.SubscribedEvent.status < 0)
+                    )
+                )
             for event in failed_events:
                 self._event_types[event_type_name][2].add(event.event)
 
@@ -289,8 +305,8 @@ class Subscriber(object):
                     #processed over 1 hour, treat it as failed.
                     pass
                 else:
-                    #is processing by other process
-                    return False
+                    #is processing by other process,treat it as processed
+                    return True
 
                 #get the processing lock
                 updated_rows = models.SubscribedEvent.update(
@@ -307,15 +323,15 @@ class Subscriber(object):
                 ).execute()
 
                 if not updated_rows:
-                    #is processing by other process
-                    return False
+                    #is processing by other process,treat it as processed
+                    return True
         
             try:
                 now = timezone.now()
     
                 if not created:
                     #save the processing history for the failed event before reprocessing.
-                    models.EventProcessHistory.create(
+                    models.EventProcessingHistory.create(
                         subscribed_event = subscribedevent,
                         process_host = subscribedevent.process_host,
                         process_pid = subscribedevent.process_pid,
@@ -459,9 +475,17 @@ payload={}
                 self._event_types[event_type_name][2] = worker
             else:
                 self._event_types[event_type_name] = [subscribed_event_type,callback,worker]
-            self._replay_failed_events(event_type_name,subscribed_event_type)
+
+            if subscribed_event_type.replay_missed_events:
+                #replay failed event only if replay missed events is enabled
+                self._replay_failed_events(event_type_name,subscribed_event_type)
             self._replay_missed_events(event_type_name,subscribed_event_type)
             
+            models.SubscribedEventType.update(
+                last_listening_time = timezone.now()
+            ).where(
+                (models.SubscribedEventType.id == subscribed_event_type.id)
+            ).execute()
             with self.connection.cursor() as cur:
                 #listen pg notification
                 cur.execute('LISTEN "{}";'.format(event_type_name))
@@ -517,7 +541,7 @@ payload={}
                     while self.connection.notifies:
                         notify_event = self.connection.notifies.pop(0)
                         event_type_name = notify_event.channel
-                        print("{}:{} in {}".format(event_type_name,notify_event,self._event_types.keys()))
+                        logger.debug("{}:{} in {}".format(event_type_name,notify_event,self._event_types.keys()))
                         
                         if event_type_name not in self._event_types:
                             #not listening this event type. skip

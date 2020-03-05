@@ -157,8 +157,12 @@ class SubscribedEventType(ActiveModel):
     category = models.SmallIntegerField(default=MANAGED,choices=CATEGORY_CHOICES)
     event_processing_module = models.ForeignKeyField(EventProcessingModule,null=True)
     parameters = JSONField(null=True)
+    replay_missed_events = models.BooleanField(default=True)
+    replay_failed_events = models.BooleanField(default=True)
+
     last_dispatched_event = models.ForeignKeyField(Event,null=True)
     last_dispatched_time = models.DateTimeField(null=True)
+    last_listening_time = models.DateTimeField(null=True)
 
     @property
     def is_system_event_type(self):
@@ -214,6 +218,7 @@ class SubscribedEvent(BaseModel):
     TIMEOUT = -2
 
     PROCESSING_TIMEOUT = timedelta(hours=1)
+    REPROCESSING_INTERVAL = timedelta(minutes=5)
 
     subscriber = models.ForeignKeyField(Subscriber,null=False,backref="events")
     publisher = models.ForeignKeyField(Publisher,null=False,backref="subscribed_publisher_events")
